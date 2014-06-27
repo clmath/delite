@@ -1,5 +1,5 @@
 define([
-	"delite/css!../css/test1.css"
+	"delite/css!../css/test1"
 ], function () {
 	// This module loads test1.css.
 	return null;

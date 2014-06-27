@@ -1,98 +1,346 @@
 /**
- * CSS loading plugin for widgets.
- *
- * This plugin will load the specified CSS files, or alternately AMD modules containing CSS,
- * and insert their content into the document in the specified order.
- *
- * The CSS files or modules are specified as a comma separated list, for example
- * `delite/css!../foo.css,../bar.css` or for modules, `delite/css!../foo,../bar`.
- *
- * Similar to `text!`, this plugin won't resolve until it has completed loading the specified CSS.
- *
- * This loader has the following limitations:
- *
- * - The plugin will not wait for `@import` statements to complete before resolving.
- * Imported CSS files should not have `@import` statements, but rather
- * all CSS files needed should be listed in the widget's `define([...], ...)` dependency list.
- *
- * - Loading plain CSS files won't work cross domain, unless you set Access-Control-Allow-Origin
- * in the HTTP response header.  Instead you should load AMD modules containing CSS.
- *
- * For a more full featured loader one can use:
- *
- * - [Xstyle's CSS loader](https:* github.com/kriszyp/xstyle/blob/master/core/load-css.js)
- * - [CURL's](https:* github.com/cujojs/curl/blob/master/src/curl/plugin/css.js)
- * - [requirejs-css-plugin](https:* github.com/tyt2y3/requirejs-css-plugin)
- * - [requirecss](https:* github.com/guybedford/require-css)
- *
- * @module delite/css
- **/
-define([], function () {
+ * This includes code from https://github.com/unscriptable/cssx
+ * Copyright (c) 2010 unscriptable.com
+ */
+
+/*jslint browser:true, on:true, sub:true */
+
+define([
+	"requirejs-dplugins/has",
+	"module"
+], function (has, module) {
 	"use strict";
 
-	var doc = document,
-		head = doc.head || doc.getElementsByTagName("head")[0],
-		lastInsertedStylesheet,
-		sheets = {};		// map of which stylesheets have already been inserted
-
-	/**
-	 * Inserts the specified CSS into the document, after any CSS previously inserted
-	 * by this function, but before any user-defined CSS.  This lets the app's stylesheets
-	 * override the widget's default styling.
-	 * @param {string} css
-	 * @returns {HTMLStyleElement}
+	/*
+	 * AMD css! plugin
+	 * This plugin will load and wait for css files.  This could be handy when
+	 * loading css files as part of a layer or as a way to apply a run-time theme.
+	 * Most browsers do not support the load event handler of the link element.
+	 * Therefore, we have to use other means to detect when a css file loads.
+	 * (The HTML5 spec states that the LINK element should have a load event, but
+	 * not even Chrome 8 or FF4b7 have it, yet.
+	 * http://www.w3.org/TR/html5/semantics.html#the-link-element)
+	 *
+	 * This plugin tries to use the load event and a universal work-around when
+	 * it is invoked the first time.  If the load event works, it is used on
+	 * every successive load.  Therefore, browsers that support the load event will
+	 * just work (i.e. no need for hacks!).  FYI, Feature-detecting the load
+	 * event is tricky since most browsers have a non-functional onload property.
+	 *
+	 * The universal work-around watches a stylesheet until its rules are
+	 * available (not null or undefined).  There are nuances, of course, between
+	 * the various browsers.  The isLinkReady function accounts for these.
+	 *
+	 * Note: it appears that all browsers load @import'ed stylesheets before
+	 * fully processing the rest of the importing stylesheet. Therefore, we
+	 * don't need to find and wait for any @import rules explicitly.
+	 *
+	 * Global configuration options:
+	 *
+	 * cssWatchPeriod: if direct load-detection techniques fail, this option
+	 * determines the msec to wait between brute-force checks for rules. The
+	 * default is 50 msec.
+	 *
+	 * You may specify an alternate file extension:
+	 *      require('css!myproj/component.less') // --> myproj/component.less
+	 *      require('css!myproj/component.scss') // --> myproj/component.scss
+	 *
+	 * When using alternative file extensions, be sure to serve the files from
+	 * the server with the correct mime type (text/css) or some browsers won't
+	 * parse them, causing an error in the plugin.
+	 *
+	 * usage:
+	 *      require(['css!myproj/comp']); // load and wait for myproj/comp.css
+	 *      define(['css!some/folder/file'], {}); // wait for some/folder/file.css
+	 *
+	 * Tested in:
+	 *      Firefox 28+
+	 *      Safari 6+
+	 *      Chrome 33+
+	 *      IE 9+
+	 *      Android 4.x
+	 *      Windows Phone 8.x
+	 *      iOS 6+
 	 */
-	function insertCss(css) {
-		// Creates a new stylesheet on each call.  Could alternately just add CSS to the old stylesheet.
-		// Maybe the current implementation is faster.
-		var styleSheet = doc.createElement("style");
-		styleSheet.setAttribute("type", "text/css");
-		styleSheet.appendChild(doc.createTextNode(css));
-		head.insertBefore(styleSheet, lastInsertedStylesheet ? lastInsertedStylesheet.nextSibling : head.firstChild);
-		lastInsertedStylesheet = styleSheet;
-		return styleSheet;
+
+	var
+	// failed is true if RequireJS threw an exception
+		failed = false,
+		cache = {},
+		lastInsertedLink,
+	// build variables
+		loadList = [],
+		writePluginFiles;
+
+	has.add("event-link-onload-api", function (global) {
+		var wk = navigator.userAgent.match(/AppleWebKit\/([\d.]+)/);
+		return global.document && global.document.createElement("link").onload === null
+			// PR: needed for webkit browser (actually iOS 5.x or Android 4.x Stock Browser...)
+			&& (!wk || parseInt(wk[1], 10) > 535);
+	});
+
+	function createLink() {
+		var link = document.createElement("link");
+		link.rel = "stylesheet";
+		link.type = "text/css";
+		return link;
 	}
 
+	function nameWithExt(name, defaultExt) {
+		return (/\.[^/]*$/.test(name)) ? name : name + "." + defaultExt;
+	}
+
+	var loadDetector = function (params, cb) {
+		// failure detection
+		// we need to watch for onError when using RequireJS so we can shut off
+		// our setTimeouts when it encounters an error.
+		if (require.onError) {
+			require.onError = (function (orig) {
+				return function () {
+					failed = true;
+					orig.apply(this, arguments);
+				};
+			})(require.onError);
+		}
+
+		/***** load-detection functions *****/
+
+		function loadHandler(params, cb) {
+			// We're using "readystatechange" because IE and Opera happily support both
+			var link = params.link;
+			link.onreadystatechange = link.onload = function () {
+				if (!link.readyState || link.readyState === "complete") {
+					has.add("event-link-onload-api", true, true, true);
+					cleanup(params);
+					cb(params);
+				}
+			};
+		}
+
+		// alternative path for browser with broken link-onload
+
+		function isLinkReady(link) {
+			// based on http://www.yearofmoo.com/2011/03/cross-browser-stylesheet-preloading.html
+			// Therefore, we need
+			// to continually test beta browsers until they all support the LINK load
+			// event like IE and Opera.
+			// webkit's and IE's sheet is null until the sheet is loaded
+			var sheet = link.sheet || link.styleSheet;
+			if (sheet) {
+				var styleSheets = document.styleSheets;
+				for (var i = styleSheets.length; i > 0; i--) {
+					if (styleSheets[i - 1] === sheet) {
+						return true;
+					}
+				}
+			}
+		}
+
+		function ssWatcher(params, cb) {
+			// watches a stylesheet for loading signs.
+			if (isLinkReady(params.link)) {
+				cleanup(params);
+				cb(params);
+			} else if (!failed) {
+				setTimeout(function () {
+					ssWatcher(params, cb);
+				}, params.wait);
+			}
+		}
+
+		function cleanup(params) {
+			var link = params.link;
+			link.onreadystatechange = link.onload = null;
+		}
+
+		// It would be nice to use onload everywhere, but the onload handler
+		// only works in IE and Opera.
+		// Detecting it cross-browser is completely impossible, too, since
+		// THE BROWSERS ARE LIARS! DON'T TELL ME YOU HAVE AN ONLOAD PROPERTY
+		// IF IT DOESN'T DO ANYTHING!
+		var loaded;
+
+		function cbOnce() {
+			if (!loaded) {
+				loaded = true;
+				cb(params);
+			}
+		}
+
+		loadHandler(params, cbOnce);
+		if (!has("event-link-onload-api")) {
+			ssWatcher(params, cbOnce);
+		}
+	};
+
+	var buildFunctions = {
+		writeConfig: function (write, mid, layerPath, loadList) {
+			var cssConf = {
+				config: {}
+			};
+			cssConf.config[mid] = {
+				layersMap: {}
+			};
+			cssConf.config[mid].layersMap[layerPath] = loadList;
+			
+			// Write css config on the layer
+			write("require.config(" + JSON.stringify(cssConf) + ");");
+		},
+
+		writeLayer: function (writePluginFiles, CleanCSS, dest, loadList) {
+			var result = "";
+			loadList.forEach(function (src) {
+				result += new CleanCSS({
+					relativeTo: "./",
+					target: dest
+				}).minify("@import url(" + src + ");");
+			});
+			writePluginFiles(dest, result);
+		},
+
+		buildLoadList: function (list, logicalPaths) {
+			var paths = logicalPaths.split(/, */);
+			paths.forEach(function (path) {
+				if (list.indexOf(path) === -1) {
+					list.push(path);
+				}
+			});
+		},
+
+		getLayersToLoad: function (layersMap, paths) {
+			function normalizeLayersMap(layersMap) {
+				var result = {};
+				for (var layer in layersMap) {
+					layersMap[layer].forEach(function (bundle) {
+						result[bundle] = layer;
+					});
+				}
+				return result;
+			}
+
+			layersMap = normalizeLayersMap(layersMap);
+			paths = paths.split(/, */);
+			var layersToLoad = [];
+			
+			paths = paths.filter(function (path) {
+				if (layersMap[path]) {
+					layersToLoad.push(layersMap[path]);
+					return false;
+				}
+				return true;
+			});
+			return paths.concat(layersToLoad).join(",");
+		}
+	};
+	
+	/***** finally! the actual plugin *****/
 	return {
 		/**
-		 * Load and install the specified CSS files, in specified order, and then call onload().
-		 * @param {string} mids - Absolute path to the resource.
-		 * @param {Function} require - AMD's require() method.
-		 * @param {Function} onload - Callback function which will be called, when the loading finishes
-		 *     and the stylesheet has been inserted.
+		 * Convert relative paths to absolute ones.   By default only the first path (in the comma
+		 * separated list) is converted.
 		 * @private
 		 */
-		load: function (mids, require, onload) {
-			// Use dojo/text! to load the CSS data rather than <link> tags because:
-			//		1. In a build, the CSS data will already be inlined into the JS file.  Using <link> tags would
-			//		   cause needless network requests.
-			//		2. Avoid browser branching/hacks.  Many browsers have issues detecting
-			//		   when CSS has finished loading and require tricks to detect it.
+		normalize: function (resourceDef, normalize) {
+			return resourceDef.split(/, */).map(normalize).join(",");
+		},
 
-			mids = mids.split(/, */);
+		/*jshint maxcomplexity: 11*/
+		load: function (resourceDef, require, callback, loaderConfig) {
+			if (loaderConfig.isBuild) {
+				buildFunctions.buildLoadList(loadList, resourceDef);
+				callback();
+				return;
+			}
 
-			var dependencies = mids.map(function (path) {
-				return (/\.css$/).test(path) ? "requirejs-text/text!" + path : path;
-			});
+			var config = module.config();
+			if (config.layersMap) {
+				resourceDef = buildFunctions.getLayersToLoad(config.layersMap, resourceDef);
+			}
 
-			require(dependencies, function () {
-				// We loaded all the requested CSS files, but some may have already been inserted into the document,
-				// possibly in between when the require() call started and now.  Insert the others CSS files now.
-				var cssTexts = arguments;
-				mids.forEach(function (mid, idx) {
-					if (!(mid in sheets)) {
-						// Adjust relative image paths to be relative to document location rather than to the CSS file.
-						// Necessary since we are inserting the CSS as <style> nodes rather than as <link> nodes.
-						var css = cssTexts[idx],
-							pathToCssFile = require.toUrl(mid).replace(/[^/]+$/, ""),
-							adjustedCss = css.replace(/(url\(")([^/])/g, "$1" + pathToCssFile + "$2");
+			var resources = resourceDef.split(","),
+				loadingCount = resources.length;
 
-						// Insert CSS into document
-						sheets[mid] = insertCss(adjustedCss);
+			// all detector functions must ensure that this function only gets
+			// called once per stylesheet!
+			function loaded(params) {
+				// load/error handler may have executed before stylesheet is
+				// fully parsed / processed in Opera, so use setTimeout.
+				// Opera will process before the it next enters the event loop
+				// (so 0 msec is enough time).
+				var cached = cache[params.url];
+				cached.s = "loaded";
+				var cbs = cached.cbs;
+				delete cached.cbs;
+				if (cbs) {
+					cbs.forEach(function (f) { f(); });
+				}
+				// if all stylesheets have been loaded, then call the plugin callback
+				if (--loadingCount === 0) {
+					callback(link.sheet || link.styleSheet);
+				}
+			}
+
+			// after will become truthy once the loop executes a second time
+			for (var i = 0, after; i < resources.length; i++, after = url) {
+				resourceDef = resources[i];
+				var name = resourceDef,
+					url = nameWithExt(require.toUrl(name), "css"),
+					link = createLink(),
+					// TODO PR: should we still support these options ?
+					params = {
+						link: link,
+						url: url,
+						wait: config && config.cssWatchPeriod || 25
+					},
+					cached = cache[url];
+				if (cached) {
+					switch (cached.s) {
+					case "loaded":
+						loaded(params);
+						continue;
+					case "injected":
+						// if the link has been injected in a previous load() call but not yet loaded,
+						// we register the loaded callback of this module to get called when the injected css will be
+						// loaded, and process the next resourceDef, if any.
+						var f = loaded.bind(this, params);
+						cached.cbs ? cached.cbs.push(f) : (cached.cbs = [f]);
+						continue;
 					}
-				});
-				onload(mids);
-			});
-		}
+				}
+				cache[params.url] = {s: "injected"};
+				// hook up load detector(s)
+				loadDetector(params, loaded);
+				// go!
+				var head = document.head || document.getElementsByTagName("head")[0];
+				link.href = url;
+				head.insertBefore(link, lastInsertedLink ? lastInsertedLink.nextSibling : head.firstChild);
+				lastInsertedLink = link;
+			}
+		},
+		
+		writeFile: function (pluginName, resource, require, write) {
+			writePluginFiles = write;
+		},
+		
+		onLayerEnd: function (write, data) {
+			function getLayerPath() {
+				return data.path.replace(/^(?:\.\/)?(([^\/]*\/)*)[^\/]*$/, "$1css/layer.css");
+			}
+
+			if (data.name && data.path) {
+				var CleanCSS = require("clean-css");
+				var dest = getLayerPath();
+
+				// Write layer file
+				buildFunctions.writeLayer(writePluginFiles, CleanCSS, dest, loadList);
+				// Write css config on the layer
+				buildFunctions.writeConfig(write, module.id, dest, loadList);
+				// Reset loadList
+				loadList = [];
+			}
+		},
+		
+		// Expose build functions to be used by delite/theme
+		buildFunctions: buildFunctions
 	};
 });

@@ -12,8 +12,12 @@ define([
 	function getStyles() {
 		// summary:
 		//		Debugging method to get all the styles in the document.
-		return Array.prototype.map.call(document.getElementsByTagName("style"), function (s) {
-			return "<style>\n" + s.innerHTML.substr(0, 100) + "\n</style>";
+		var sheets = document.styleSheets;
+		return Array.prototype.map.call(sheets, function (s) {
+			var rules = s.cssRules || s.rules;
+			return Array.prototype.map.call(rules, function (r) {
+				return r.cssText;
+			});
 		}).join("\n");
 	}
 
@@ -44,8 +48,8 @@ define([
 
 			// Load two modules that both use delite/css! to load test1.css
 			require([
-				"./resources/TestCssWidget1",
-				"./resources/TestCssWidget2"
+				"./resources/TestLoadCssWidget1",
+				"./resources/TestLoadCssWidget2"
 			], d.rejectOnError(function () {
 				// test1.css should be automatically loaded (but just once, not twice) by the time
 				// this require() call completes.
@@ -92,9 +96,25 @@ define([
 			// Load another modules that uses delite/css! to load the same test1.css,
 			// just to triple check that the CSS doesn't get reloaded
 			require([
-				"./resources/TestCssWidget3"
+				"./resources/TestLoadCssWidget3"
 			], d.callback(function () {
 				assert.strictEqual(getStyles().match(/test1/g).length, 1, "test1.css inserted once");
+			}));
+
+			return d;
+		},
+
+		concurrent: function () {
+			var d = this.async(10000);
+
+			// Load two modules that both use delite/css! to load test1.css
+			require([
+				"./resources/TestLoadCssWidget4"
+			], d.callback(function () {
+				// test4.css should be automatically loaded (but just once, not twice) by the time
+				// this require() call completes. There will be an error if not all the callbacks for
+				// each requests of css/test1 are called.
+				assert.strictEqual(getStyles().match(/test4/g).length, 1, "test4.css inserted once");
 			}));
 
 			return d;
@@ -124,24 +144,6 @@ define([
 					assert.strictEqual(getComputedStyle(window.test3).borderLeftWidth, "3px", "test3 border-width");
 					assert.strictEqual(getComputedStyle(window.userDefined).borderLeftWidth, "4px",
 						"userDefined border-width");
-				}), 10);
-			}));
-
-			return d;
-		},
-
-		javascript: function () {
-			var d = this.async(10000);
-
-			// Test loading JS file generated from CSS file
-			require(["delite/css!delite/tests/unit/css/specialChars_css"], d.rejectOnError(function () {
-				setTimeout(d.callback(function () {
-					// specialChars defines the .native and .encoded classes with the same ::before content.
-					// Check that content is defined correctly for each of those classes.
-					// Hard to test directly, but we can check that each class produces the same width <span>.
-					assert(window.native.offsetWidth > 0, "native content appears");
-					assert(window.encoded.offsetWidth > 0, "encoded content appears");
-					assert.strictEqual(window.native.offsetWidth, window.encoded.offsetWidth, "same width");
 				}), 10);
 			}));
 
