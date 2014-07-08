@@ -1,12 +1,12 @@
 /**
  * Plugin to load the specified CSS file(s), substituting {{theme}} with the theme for the current page.
- * 
+ *
  * For example, on an iPhone `theme!./css/{{theme}}/common,./Button/{{theme}}/Button`
  * will load (in the following order if the css files are not already loaded):
- * 
+ *
  * - ./css/ios/common
  * - ./Button/ios/Button
- * 
+ *
  * You can also pass an additional URL parameter string
  * `theme={theme widget}` to force a specific theme through the browser
  * URL input. The available theme ids are bootstrap, holodark (theme introduced in Android 3.0)
@@ -32,11 +32,7 @@ define([
 	"use strict";
 
 	var config = module.config();
-	
-	var loadList = [];
-	
-	var writePluginFiles;
-	
+
 	var load = /** @lends module:delite/theme */ {
 		/**
 		 * A map of user-agents to theme files.
@@ -109,17 +105,17 @@ define([
 			// Add CSS file which contains definitions global to the theme.
 			logicalPaths = "delite/themes/{{theme}}/global.css" + (logicalPaths ? "," + logicalPaths : "");
 
-			if (loaderConfig.isBuild) {
+			if (has("builder") && loaderConfig.isBuild) {
 				css.buildFunctions.buildLoadList(loadList, logicalPaths);
 				onload();
 				return;
 			}
-			
+
 			// Replace single css bundles by corresponding layer.
 			if (config.layersMap) {
-				logicalPaths = css.buildFunctions.getLayersToLoad(config.layersMap, logicalPaths);
+				logicalPaths = css.getLayersToLoad(config.layersMap, logicalPaths);
 			}
-						
+
 			// Convert list of logical paths into list of actual paths
 			// ex: Button/css/{{theme}}/Button --> Button/css/ios/Button
 			var actualPaths = logicalPaths.replace(/{{theme}}/g, load.getTheme());
@@ -128,13 +124,18 @@ define([
 			req([ "./css!" + actualPaths ], function () {
 				onload(arguments);
 			});
-		},
-		
-		writeFile: function (pluginName, resource, require, write) {
+		}
+	};
+
+	if (has("builder")) {
+		var loadList = [];
+		var writePluginFiles;
+
+		load.writeFile = function (pluginName, resource, require, write) {
 			writePluginFiles = write;
-		},
-		
-		onLayerEnd: function (write, data) {
+		};
+
+		load.onLayerEnd = function (write, data) {
 			function getLayerPath(theme) {
 				var pathRE = /^(?:\.\/)?(([^\/]*\/)*)[^\/]*$/;
 				return data.path.replace(pathRE, "$1themes/layer_" + (theme || "{{theme}}") + ".css");
@@ -150,15 +151,14 @@ define([
 					});
 					css.buildFunctions.writeLayer(writePluginFiles, CleanCSS, dest, themedLoadList);
 				});
-				
+
 				// Write css config on the layer
 				css.buildFunctions.writeConfig(write, module.id, getLayerPath(), loadList);
-				
+
 				// Reset loadList
 				loadList = [];
 			}
-		}
-	};
-
+		};
+	}
 	return load;
 });
