@@ -47,10 +47,7 @@ define([
 	// failed is true if RequireJS threw an exception
 		failed = false,
 		cache = {},
-		lastInsertedLink,
-	// build variables
-		loadList = [],
-		writePluginFiles;
+		lastInsertedLink;
 
 	has.add("event-link-onload-api", function (global) {
 		var wk = navigator.userAgent.match(/AppleWebKit\/([\d.]+)/);
@@ -66,10 +63,35 @@ define([
 		return link;
 	}
 
-	var loadDetector = function (params, cb) {
+	function getLayersToLoad(layersMap, paths) {
+		function normalizeLayersMap(layersMap) {
+			var result = {};
+			for (var layer in layersMap) {
+				layersMap[layer].forEach(function (bundle) {
+					result[bundle] = layer;
+				});
+			}
+			return result;
+		}
+
+		layersMap = normalizeLayersMap(layersMap);
+		paths = paths.split(/, */);
+		var layersToLoad = [];
+		
+		paths = paths.filter(function (path) {
+			if (layersMap[path]) {
+				layersToLoad.push(layersMap[path]);
+				return false;
+			}
+			return true;
+		});
+		return paths.concat(layersToLoad).join(",");
+	}
+
+	if (!has("event-link-onload-api")) {
 		// failure detection
 		// we need to watch for onError when using RequireJS so we can shut off
-		// our setTimeouts when it encounters an error.
+		// our setTimeouts set in ssWatcher when it encounters an error.
 		if (require.onError) {
 			require.onError = (function (orig) {
 				return function () {
@@ -78,8 +100,9 @@ define([
 				};
 			})(require.onError);
 		}
+	}
 
-		/***** load-detection functions *****/
+	var loadDetector = function (params, cb) {
 
 		function loadHandler(params, cb) {
 			// We're using "readystatechange" because IE and Opera happily support both
@@ -115,10 +138,15 @@ define([
 				if (isLinkReady(params.link)) {
 					cleanup(params);
 					cb(params);
-				} else if (!failed) {
-					setTimeout(function () {
-						ssWatcher(params, cb);
-					}, 25);
+				} else {
+					// if requirejs failed, app is dead, so cleanup link and stop there.
+					if (failed) {
+						cleanup(params);
+					} else {
+						setTimeout(function () {
+							ssWatcher(params, cb);
+						}, 25);
+					}
 				}
 			};
 		}
@@ -128,11 +156,6 @@ define([
 			link.onreadystatechange = link.onload = null;
 		}
 
-		// It would be nice to use onload everywhere, but the onload handler
-		// only works in IE and Opera.
-		// Detecting it cross-browser is completely impossible, too, since
-		// THE BROWSERS ARE LIARS! DON'T TELL ME YOU HAVE AN ONLOAD PROPERTY
-		// IF IT DOESN'T DO ANYTHING!
 		var loaded;
 
 		function cbOnce() {
@@ -147,69 +170,9 @@ define([
 			ssWatcher(params, cbOnce);
 		}
 	};
-
-	var buildFunctions = {
-		writeConfig: function (write, mid, layerPath, loadList) {
-			var cssConf = {
-				config: {}
-			};
-			cssConf.config[mid] = {
-				layersMap: {}
-			};
-			cssConf.config[mid].layersMap[layerPath] = loadList;
-			
-			// Write css config on the layer
-			write("require.config(" + JSON.stringify(cssConf) + ");");
-		},
-
-		writeLayer: function (writePluginFiles, CleanCSS, dest, loadList) {
-			var result = "";
-			loadList.forEach(function (src) {
-				result += new CleanCSS({
-					relativeTo: "./",
-					target: dest
-				}).minify("@import url(" + src + ");");
-			});
-			writePluginFiles(dest, result);
-		},
-
-		buildLoadList: function (list, logicalPaths) {
-			var paths = logicalPaths.split(/, */);
-			paths.forEach(function (path) {
-				if (list.indexOf(path) === -1) {
-					list.push(path);
-				}
-			});
-		},
-
-		getLayersToLoad: function (layersMap, paths) {
-			function normalizeLayersMap(layersMap) {
-				var result = {};
-				for (var layer in layersMap) {
-					layersMap[layer].forEach(function (bundle) {
-						result[bundle] = layer;
-					});
-				}
-				return result;
-			}
-
-			layersMap = normalizeLayersMap(layersMap);
-			paths = paths.split(/, */);
-			var layersToLoad = [];
-			
-			paths = paths.filter(function (path) {
-				if (layersMap[path]) {
-					layersToLoad.push(layersMap[path]);
-					return false;
-				}
-				return true;
-			});
-			return paths.concat(layersToLoad).join(",");
-		}
-	};
 	
 	/***** finally! the actual plugin *****/
-	return {
+	var loadCss = {
 		/**
 		 * Convert relative paths to absolute ones. By default only the first path (in the comma
 		 * separated list) is converted.
@@ -221,20 +184,17 @@ define([
 
 		/*jshint maxcomplexity: 11*/
 		load: function (resourceDef, require, callback, loaderConfig) {
-			if (loaderConfig.isBuild) {
+			if (has("builder") && loaderConfig.isBuild) {
 				buildFunctions.buildLoadList(loadList, resourceDef);
 				callback();
 				return;
 			}
-
 			var config = module.config();
 			if (config.layersMap) {
-				resourceDef = buildFunctions.getLayersToLoad(config.layersMap, resourceDef);
+				resourceDef = getLayersToLoad(config.layersMap, resourceDef);
 			}
-
 			var resources = resourceDef.split(","),
 				loadingCount = resources.length;
-
 			// all detector functions must ensure that this function only gets
 			// called once per stylesheet!
 			function loaded(params) {
@@ -288,12 +248,55 @@ define([
 				lastInsertedLink = link;
 			}
 		},
+
+		getLayersToLoad: getLayersToLoad
+	};
+
+	if (has("builder")) {
+		// build variables
+		var loadList = [],
+			writePluginFiles;
+
+		var buildFunctions = {
+			writeConfig: function (write, mid, layerPath, loadList) {
+				var cssConf = {
+					config: {}
+				};
+				cssConf.config[mid] = {
+					layersMap: {}
+				};
+				cssConf.config[mid].layersMap[layerPath] = loadList;
+				
+				// Write css config on the layer
+				write("require.config(" + JSON.stringify(cssConf) + ");");
+			},
+
+			writeLayer: function (writePluginFiles, CleanCSS, dest, loadList) {
+				var result = "";
+				loadList.forEach(function (src) {
+					result += new CleanCSS({
+						relativeTo: "./",
+						target: dest
+					}).minify("@import url(" + src + ");");
+				});
+				writePluginFiles(dest, result);
+			},
+
+			buildLoadList: function (list, logicalPaths) {
+				var paths = logicalPaths.split(/, */);
+				paths.forEach(function (path) {
+					if (list.indexOf(path) === -1) {
+						list.push(path);
+					}
+				});
+			}
+		};
 		
-		writeFile: function (pluginName, resource, require, write) {
+		loadCss.writeFile = function (pluginName, resource, require, write) {
 			writePluginFiles = write;
-		},
-		
-		onLayerEnd: function (write, data) {
+		};
+				
+		loadCss.onLayerEnd = function (write, data) {
 			function getLayerPath() {
 				return data.path.replace(/^(?:\.\/)?(([^\/]*\/)*)[^\/]*$/, "$1css/layer.css");
 			}
@@ -309,9 +312,11 @@ define([
 				// Reset loadList
 				loadList = [];
 			}
-		},
-		
+		};
+				
 		// Expose build functions to be used by delite/theme
-		buildFunctions: buildFunctions
-	};
+		loadCss.buildFunctions = buildFunctions;
+	}
+	
+	return loadCss;
 });
