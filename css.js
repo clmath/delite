@@ -1,9 +1,8 @@
-/**
+/** @module delite/css */
+/*
  * This includes code from https://github.com/unscriptable/cssx
  * Copyright (c) 2010 unscriptable.com
  */
-
-/*jslint browser:true, on:true, sub:true */
 
 define([
 	"requirejs-dplugins/has",
@@ -15,43 +14,24 @@ define([
 	 * AMD css! plugin
 	 * This plugin will load and wait for css files.  This could be handy when
 	 * loading css files as part of a layer or as a way to apply a run-time theme.
-	 * Most browsers do not support the load event handler of the link element.
-	 * Therefore, we have to use other means to detect when a css file loads.
-	 * (The HTML5 spec states that the LINK element should have a load event, but
-	 * not even Chrome 8 or FF4b7 have it, yet.
-	 * http://www.w3.org/TR/html5/semantics.html#the-link-element)
-	 *
-	 * This plugin tries to use the load event and a universal work-around when
-	 * it is invoked the first time.  If the load event works, it is used on
-	 * every successive load.  Therefore, browsers that support the load event will
-	 * just work (i.e. no need for hacks!).  FYI, Feature-detecting the load
-	 * event is tricky since most browsers have a non-functional onload property.
-	 *
+	 * This plugin uses the link load event and a work-around on old webkit browser.
 	 * The universal work-around watches a stylesheet until its rules are
-	 * available (not null or undefined).  There are nuances, of course, between
-	 * the various browsers.  The isLinkReady function accounts for these.
-	 *
-	 * Note: it appears that all browsers load @import'ed stylesheets before
-	 * fully processing the rest of the importing stylesheet. Therefore, we
-	 * don't need to find and wait for any @import rules explicitly.
+	 * available (not null or undefined).
 	 *
 	 * Global configuration options:
 	 *
-	 * cssWatchPeriod: if direct load-detection techniques fail, this option
-	 * determines the msec to wait between brute-force checks for rules. The
-	 * default is 50 msec.
-	 *
 	 * You may specify an alternate file extension:
-	 *      require('css!myproj/component.less') // --> myproj/component.less
-	 *      require('css!myproj/component.scss') // --> myproj/component.scss
+	 *
+	 *      require("css!myproj/component.less") // --> myproj/component.less
+	 *      require("css!myproj/component.scss") // --> myproj/component.scss
 	 *
 	 * When using alternative file extensions, be sure to serve the files from
 	 * the server with the correct mime type (text/css) or some browsers won't
 	 * parse them, causing an error in the plugin.
 	 *
-	 * usage:
-	 *      require(['css!myproj/comp']); // load and wait for myproj/comp.css
-	 *      define(['css!some/folder/file'], {}); // wait for some/folder/file.css
+	 * @example:
+	 *      // load and wait for myproj/comp.css
+	 *      require(["css!myproj/comp"]);
 	 *
 	 * Tested in:
 	 *      Firefox 28+
@@ -86,10 +66,6 @@ define([
 		return link;
 	}
 
-	function nameWithExt(name, defaultExt) {
-		return (/\.[^/]*$/.test(name)) ? name : name + "." + defaultExt;
-	}
-
 	var loadDetector = function (params, cb) {
 		// failure detection
 		// we need to watch for onError when using RequireJS so we can shut off
@@ -118,34 +94,33 @@ define([
 		}
 
 		// alternative path for browser with broken link-onload
+		if (!has("event-link-onload-api")) {
 
-		function isLinkReady(link) {
-			// based on http://www.yearofmoo.com/2011/03/cross-browser-stylesheet-preloading.html
-			// Therefore, we need
-			// to continually test beta browsers until they all support the LINK load
-			// event like IE and Opera.
-			// webkit's and IE's sheet is null until the sheet is loaded
-			var sheet = link.sheet || link.styleSheet;
-			if (sheet) {
-				var styleSheets = document.styleSheets;
-				for (var i = styleSheets.length; i > 0; i--) {
-					if (styleSheets[i - 1] === sheet) {
-						return true;
+			var isLinkReady = function (link) {
+				// based on http://www.yearofmoo.com/2011/03/cross-browser-stylesheet-preloading.html
+				// webkit's and IE's sheet is null until the sheet is loaded
+				var sheet = link.sheet || link.styleSheet;
+				if (sheet) {
+					var styleSheets = document.styleSheets;
+					for (var i = styleSheets.length; i > 0; i--) {
+						if (styleSheets[i - 1] === sheet) {
+							return true;
+						}
 					}
 				}
-			}
-		}
+			};
 
-		function ssWatcher(params, cb) {
-			// watches a stylesheet for loading signs.
-			if (isLinkReady(params.link)) {
-				cleanup(params);
-				cb(params);
-			} else if (!failed) {
-				setTimeout(function () {
-					ssWatcher(params, cb);
-				}, params.wait);
-			}
+			var ssWatcher = function (params, cb) {
+				// watches a stylesheet for loading signs.
+				if (isLinkReady(params.link)) {
+					cleanup(params);
+					cb(params);
+				} else if (!failed) {
+					setTimeout(function () {
+						ssWatcher(params, cb);
+					}, 25);
+				}
+			};
 		}
 
 		function cleanup(params) {
@@ -236,7 +211,7 @@ define([
 	/***** finally! the actual plugin *****/
 	return {
 		/**
-		 * Convert relative paths to absolute ones.   By default only the first path (in the comma
+		 * Convert relative paths to absolute ones. By default only the first path (in the comma
 		 * separated list) is converted.
 		 * @private
 		 */
@@ -280,17 +255,13 @@ define([
 				}
 			}
 
-			// after will become truthy once the loop executes a second time
-			for (var i = 0, after; i < resources.length; i++, after = url) {
+			for (var i = 0; i < resources.length; i++) {
 				resourceDef = resources[i];
-				var name = resourceDef,
-					url = nameWithExt(require.toUrl(name), "css"),
+				var url = require.toUrl(resourceDef),
 					link = createLink(),
-					// TODO PR: should we still support these options ?
 					params = {
 						link: link,
-						url: url,
-						wait: config && config.cssWatchPeriod || 25
+						url: url
 					},
 					cached = cache[url];
 				if (cached) {
